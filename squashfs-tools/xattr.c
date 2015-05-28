@@ -36,6 +36,13 @@
 #include <stdlib.h>
 #include <sys/xattr.h>
 
+/* SELinux */
+#include <selinux/selinux.h>
+#include <selinux/label.h>
+#include <selinux/android.h>
+#define XATTR_FULLNAME_SELINUX "security.selinux"
+#define XATTR_PREFIX_SELINUX "security."
+
 #include "squashfs_fs.h"
 #include "squashfs_swap.h"
 #include "mksquashfs.h"
@@ -89,6 +96,10 @@ extern int read_xattrs_from_disk(int, struct squashfs_super_block *);
 extern struct xattr_list *get_xattr(int, unsigned int *, int);
 extern struct prefix prefix_table[];
 
+/* SELinux */
+extern struct selabel_handle *sehnd;
+extern char* selabel_truncate;
+extern int ignore_system_xattr;
 
 static int get_prefix(struct xattr_list *xattr, char *name)
 {
@@ -119,15 +130,50 @@ static int read_xattrs_from_system(char *filename, struct xattr_list **xattrs)
 	struct xattr_list *xattr_list = NULL;
 
 	while(1) {
-		size = llistxattr(filename, NULL, 0);
+		if (ignore_system_xattr) {
+		  size = 0;
+		} else {
+		  size = llistxattr(filename, NULL, 0);
+		}
+
 		if(size <= 0) {
-			if(size < 0 && errno != ENOTSUP) {
-				ERROR_START("llistxattr for %s failed in "
-					"read_attrs, because %s", filename,
-					strerror(errno));
-				ERROR_EXIT(".  Ignoring");
+		  if (sehnd) {
+		        struct stat s;
+			char *sepath = filename;
+		        char *secontext = NULL;
+
+			lstat(filename, &s);
+			if (selabel_truncate) {
+			  sepath += strlen(selabel_truncate);
 			}
+		        if(selabel_lookup(sehnd, &secontext, sepath, s.st_mode) < 0) {
+				ERROR("SE lookup for %s failed in read_attrs,"
+					" because %s\n", filename,
+					strerror(errno));
+				return 0;
+			}
+
+			/* Create SELinux context XATTR from scratch */
+			xattr_list = (struct xattr_list*) malloc(sizeof(struct xattr_list));
+			xattr_list->full_name = strdup(XATTR_FULLNAME_SELINUX);
+			xattr_list->name = xattr_list->full_name + strlen(XATTR_PREFIX_SELINUX);
+			xattr_list->size = strlen(xattr_list->name);
+			xattr_list->vsize = strlen(secontext);
+			xattr_list->value = secontext;
+			xattr_list->vnext = NULL;
+			xattr_list->type = SQUASHFS_XATTR_SECURITY;
+			xattr_list->ool_value = 0l;
+			xattr_list->vchecksum = get_checksum(xattr_list->value, xattr_list->vsize, 0);
+			/* Insert SELinux label */
+			*xattrs = xattr_list;
+			return 1;
+		  } else {
+			if(size < 0 && errno != ENOTSUP)
+				ERROR("llistxattr for %s failed in read_attrs,"
+					" because %s\n", filename,
+					strerror(errno));
 			return 0;
+		  }
 		}
 
 		xattr_names = malloc(size);

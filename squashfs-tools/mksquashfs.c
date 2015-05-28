@@ -61,6 +61,13 @@
 #include <sys/sysinfo.h>
 #endif
 
+/* SELinux */
+#include <selinux/selinux.h>
+#include <selinux/label.h>
+#include <selinux/android.h>
+/* Android */
+#include <private/android_filesystem_config.h>
+
 #include "squashfs_fs.h"
 #include "squashfs_swap.h"
 #include "mksquashfs.h"
@@ -280,6 +287,13 @@ unsigned int xattr_bytes = 0, total_xattr_bytes = 0;
 /* fragment to file mapping used when appending */
 int append_fragments = 0;
 struct append_file **file_mapping;
+
+/* SELinux */
+struct selabel_handle *sehnd = NULL;
+struct selinux_opt seopts[] = { { SELABEL_OPT_PATH, "" } };
+int ignore_system_xattr = 0;
+int android_system_dac = 0;
+char* selabel_truncate = NULL;
 
 static char *read_from_disk(long long start, unsigned int avail_bytes);
 void add_old_root_entry(char *name, squashfs_inode inode, int inode_number,
@@ -835,6 +849,16 @@ inline unsigned int get_parent_no(struct dir_info *dir)
 	return dir->depth ? get_inode_no(dir->dir_ent->inode) : inode_no;
 }
 
+static void fix_stat(const char *path, struct stat *s)
+{
+        uint64_t capabilities;
+	char *sepath = path;
+
+	if (selabel_truncate) {
+	  sepath += strlen(selabel_truncate);
+	}
+	fs_config(sepath, S_ISDIR(s->st_mode), &s->st_uid, &s->st_gid, &s->st_mode, &capabilities);
+}
 	
 int create_inode(squashfs_inode *i_no, struct dir_info *dir_info,
 	struct dir_ent *dir_ent, int type, long long byte_size,
@@ -882,7 +906,12 @@ int create_inode(squashfs_inode *i_no, struct dir_info *dir_info,
 			type = SQUASHFS_LSOCKET_TYPE;
 		break;
 	}
-			
+
+	if (android_system_dac) {
+	  /* Android */
+	  fix_stat(filename, buf);
+	}
+
 	base->mode = SQUASHFS_MODE(buf->st_mode);
 	base->uid = get_uid((unsigned int) global_uid == -1 ?
 		buf->st_uid : global_uid);
@@ -5272,6 +5301,30 @@ print_compressor_options:
 				exit(1);
 			}	
 			root_name = argv[i];
+		} else if(strcmp(argv[i], "-S") == 0) {
+			if(++i == argc) {
+				ERROR("%s: -S: missing file\n",
+					argv[0]);
+				exit(1);
+			}	
+			seopts[0].value = argv[i];
+			sehnd = selabel_open(SELABEL_CTX_FILE, seopts, 1);
+			if (!sehnd) {
+				ERROR("%s: Error reading file context\n",
+					argv[0]);
+				exit(1);
+			}
+		} else if(strcmp(argv[i], "-ST") == 0) {
+			if(++i == argc) {
+				ERROR("%s: -ST: missing path\n",
+					argv[0]);
+				exit(1);
+			}	
+			selabel_truncate = argv[i];
+		} else if(strcmp(argv[i], "-SI") == 0) {
+			ignore_system_xattr = TRUE;
+		} else if(strcmp(argv[i], "-android-system") == 0) {
+			android_system_dac = TRUE;
 		} else if(strcmp(argv[i], "-version") == 0) {
 			VERSION();
 		} else {
